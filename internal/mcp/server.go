@@ -5,13 +5,19 @@ import (
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+
+	"github.com/pascalallen/mcp-server-go/internal/kb"
 )
 
-func NewServer() http.Handler {
+func NewServer(store *kb.Store) http.Handler {
 	s := server.NewMCPServer(
 		"mcp-server-go",
 		Version,
 		server.WithToolCapabilities(true),
+		// subscribe=false: per-resource subscriptions are not implemented.
+		// listChanged=true: AddResource/RemoveResource notify clients as
+		// knowledge base entries come and go.
+		server.WithResourceCapabilities(false, true),
 	)
 
 	echoTool := mcpgo.NewTool(
@@ -30,6 +36,8 @@ func NewServer() http.Handler {
 		mcpgo.WithDescription("Returns server name, version, and uptime in seconds."),
 	)
 	s.AddTool(serverInfoTool, HandleServerInfo)
+
+	registerKB(s, store)
 
 	return server.NewStreamableHTTPServer(s)
 }
