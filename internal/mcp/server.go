@@ -9,7 +9,10 @@ import (
 	"github.com/pascalallen/mcp-server-go/internal/kb"
 )
 
-func NewServer(store *kb.Store) http.Handler {
+// NewMCPServer builds the MCP server with all tools, resources, and prompts
+// registered. Callers pick a transport with NewHTTPHandler or
+// server.ServeStdio.
+func NewMCPServer(store *kb.Store) *server.MCPServer {
 	s := server.NewMCPServer(
 		"mcp-server-go",
 		Version,
@@ -18,6 +21,7 @@ func NewServer(store *kb.Store) http.Handler {
 		// listChanged=true: AddResource/RemoveResource notify clients as
 		// knowledge base entries come and go.
 		server.WithResourceCapabilities(false, true),
+		server.WithPromptCapabilities(false),
 	)
 
 	echoTool := mcpgo.NewTool(
@@ -38,6 +42,12 @@ func NewServer(store *kb.Store) http.Handler {
 	s.AddTool(serverInfoTool, HandleServerInfo)
 
 	registerKB(s, store)
+	registerPrompts(s)
 
+	return s
+}
+
+// NewHTTPHandler wraps an MCP server in the streamable HTTP transport.
+func NewHTTPHandler(s *server.MCPServer) http.Handler {
 	return server.NewStreamableHTTPServer(s)
 }
