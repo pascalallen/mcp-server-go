@@ -47,8 +47,8 @@ func TestStoreCRUD(t *testing.T) {
 	if _, err := s.Add(e.Slug, "Dup", "x", nil); !errors.Is(err, ErrExists) {
 		t.Errorf("duplicate Add error = %v, want ErrExists", err)
 	}
-	if _, err := s.Add("Bad Slug!", "t", "b", nil); err == nil {
-		t.Error("Add with invalid slug should fail")
+	if _, err := s.Add("Bad Slug!", "t", "b", nil); !errors.Is(err, ErrInvalidSlug) {
+		t.Errorf("Add with invalid slug error = %v, want ErrInvalidSlug", err)
 	}
 
 	got, ok := s.Get(e.Slug)
@@ -122,5 +122,57 @@ func TestList(t *testing.T) {
 	list := s.List()
 	if len(list) != 3 || list[0].Slug != "alpha" || list[1].Slug != "bravo" || list[2].Slug != "charlie" {
 		t.Errorf("List not sorted by slug: %+v", list)
+	}
+}
+
+func TestListPage(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	slugs := []string{"alpha", "bravo", "charlie", "delta", "echo"}
+	for _, slug := range slugs {
+		if _, err := s.Add(slug, slug, "body", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Walk all pages with limit 2 and confirm the union covers every entry
+	// in order.
+	var seen []string
+	cursor := ""
+	for range 10 {
+		entries, total, next := s.ListPage(cursor, 2)
+		if total != len(slugs) {
+			t.Errorf("total = %d, want %d", total, len(slugs))
+		}
+		for _, e := range entries {
+			seen = append(seen, e.Slug)
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if len(seen) != len(slugs) {
+		t.Fatalf("paged through %v, want %v", seen, slugs)
+	}
+	for i, slug := range slugs {
+		if seen[i] != slug {
+			t.Errorf("seen[%d] = %s, want %s", i, seen[i], slug)
+		}
+	}
+
+	// A limit of zero falls back to the default; huge limits are clamped.
+	if entries, _, next := s.ListPage("", 0); len(entries) != len(slugs) || next != "" {
+		t.Errorf("limit 0: entries=%d next=%q", len(entries), next)
+	}
+	if entries, _, _ := s.ListPage("", MaxListLimit+1); len(entries) != len(slugs) {
+		t.Errorf("huge limit: entries=%d", len(entries))
+	}
+
+	// A cursor past the last slug yields an empty final page.
+	if entries, _, next := s.ListPage("zulu", 2); len(entries) != 0 || next != "" {
+		t.Errorf("past-end cursor: entries=%d next=%q", len(entries), next)
 	}
 }

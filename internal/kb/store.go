@@ -13,8 +13,9 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("kb: entry not found")
-	ErrExists   = errors.New("kb: entry already exists")
+	ErrNotFound    = errors.New("kb: entry not found")
+	ErrExists      = errors.New("kb: entry already exists")
+	ErrInvalidSlug = errors.New("kb: invalid slug")
 )
 
 // Store is a knowledge base backed by Markdown files in a single directory,
@@ -76,6 +77,37 @@ func (s *Store) List() []Entry {
 	return out
 }
 
+const (
+	DefaultListLimit = 20
+	MaxListLimit     = 100
+)
+
+// ListPage returns a slug-ordered page of entries starting after cursor (an
+// empty cursor starts from the beginning), the total number of entries, and
+// the cursor for the next page (empty when there are no further entries).
+// A limit outside [1, MaxListLimit] is clamped, defaulting to
+// DefaultListLimit.
+func (s *Store) ListPage(cursor string, limit int) (entries []Entry, total int, nextCursor string) {
+	if limit <= 0 {
+		limit = DefaultListLimit
+	}
+	if limit > MaxListLimit {
+		limit = MaxListLimit
+	}
+	all := s.List()
+	total = len(all)
+	start := 0
+	for start < len(all) && all[start].Slug <= cursor {
+		start++
+	}
+	end := min(start+limit, len(all))
+	entries = all[start:end]
+	if end < len(all) {
+		nextCursor = all[end-1].Slug
+	}
+	return entries, total, nextCursor
+}
+
 // Add creates a new entry and persists it. An empty slug is derived from the
 // title via Slugify.
 func (s *Store) Add(slug, title, body string, tags []string) (Entry, error) {
@@ -83,7 +115,7 @@ func (s *Store) Add(slug, title, body string, tags []string) (Entry, error) {
 		slug = Slugify(title)
 	}
 	if !validSlug.MatchString(slug) {
-		return Entry{}, fmt.Errorf("kb: invalid slug %q: must match %s", slug, validSlug)
+		return Entry{}, fmt.Errorf("%w %q: must match %s", ErrInvalidSlug, slug, validSlug)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

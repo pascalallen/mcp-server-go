@@ -1,8 +1,10 @@
 package kb
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func newSearchStore(t *testing.T) *Store {
@@ -67,6 +69,27 @@ func TestSearchLimitAndMiss(t *testing.T) {
 	if got := s.Search("   ", 10); got != nil {
 		t.Errorf("blank query got %+v, want nil", got)
 	}
+	// A limit of zero falls back to the default rather than dropping every
+	// result.
+	if got := s.Search("widgets", 0); len(got) != 3 {
+		t.Errorf("limit=0 got %d results, want 3", len(got))
+	}
+}
+
+func TestSearchLimitClamped(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range MaxSearchLimit + 10 {
+		slug := fmt.Sprintf("entry-%03d", i)
+		if _, err := s.Add(slug, "Widgets", "widgets", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := s.Search("widgets", 10_000); len(got) != MaxSearchLimit {
+		t.Errorf("huge limit got %d results, want %d", len(got), MaxSearchLimit)
+	}
 }
 
 func TestSearchSnippet(t *testing.T) {
@@ -88,5 +111,32 @@ func TestSearchSnippet(t *testing.T) {
 	}
 	if !strings.HasPrefix(sn, "…") || !strings.HasSuffix(sn, "…") {
 		t.Errorf("snippet %q missing ellipses", sn)
+	}
+}
+
+// Snippet cut points must never split a multi-byte rune, wherever the match
+// lands relative to runs of non-ASCII text.
+func TestSearchSnippetUTF8(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	multibyte := strings.Repeat("héllo wörld déjà vu ", 20)
+	for i, body := range []string{
+		multibyte + "needle" + multibyte, // match surrounded by multi-byte text
+		"needle " + multibyte,            // match at the start
+		multibyte,                        // no body match: snippet from the lead
+	} {
+		slug := fmt.Sprintf("utf-%d", i)
+		if _, err := s.Add(slug, "Entry wörld", body, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, query := range []string{"needle", "wörld"} {
+		for _, r := range s.Search(query, 10) {
+			if !utf8.ValidString(r.Snippet) {
+				t.Errorf("query %q, entry %s: snippet is not valid UTF-8: %q", query, r.Entry.Slug, r.Snippet)
+			}
+		}
 	}
 }
