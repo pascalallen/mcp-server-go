@@ -11,9 +11,9 @@ type Router struct {
 	engine *gin.Engine
 }
 
-func NewRouter(mcpHandler http.Handler) Router {
+func NewRouter(mcpHandler http.Handler, sec SecurityConfig) Router {
 	r := gin.Default()
-	r.Any("/mcp", gin.WrapH(mcpHandler))
+	r.Any("/mcp", Security(sec), gin.WrapH(mcpHandler))
 	return Router{engine: r}
 }
 
