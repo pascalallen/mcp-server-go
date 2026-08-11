@@ -62,6 +62,9 @@ func TestHandleAddGetDelete(t *testing.T) {
 	if err != nil || res.IsError {
 		t.Fatalf("kb_delete: err=%v result=%+v", err, res)
 	}
+	if del, ok := res.StructuredContent.(deleteOutput); !ok || !del.Deleted || del.Slug != "test-entry" {
+		t.Errorf("kb_delete structured content = %#v", res.StructuredContent)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "test-entry.md")); !os.IsNotExist(err) {
 		t.Error("entry file still exists after kb_delete")
 	}
@@ -85,6 +88,13 @@ func TestHandleAddErrors(t *testing.T) {
 	}))
 	if err != nil || !res.IsError {
 		t.Errorf("duplicate slug should be a tool error, got err=%v result=%+v", err, res)
+	}
+
+	res, err = k.handleAdd(context.Background(), callReq("kb_add", map[string]any{
+		"title": "Bad", "body": "z", "slug": "Not A Slug!",
+	}))
+	if err != nil || !res.IsError {
+		t.Errorf("invalid slug should be a tool error, got err=%v result=%+v", err, res)
 	}
 }
 
@@ -140,9 +150,7 @@ func TestHandleSearchAndList(t *testing.T) {
 	if err != nil || res.IsError {
 		t.Fatalf("kb_search: err=%v result=%+v", err, res)
 	}
-	sr := res.StructuredContent.(struct {
-		Results []kb.SearchResult `json:"results"`
-	})
+	sr := res.StructuredContent.(searchOutput)
 	if len(sr.Results) != 1 || sr.Results[0].Entry.Slug != "widgets-guide" {
 		t.Errorf("kb_search results = %+v", sr.Results)
 	}
@@ -151,11 +159,40 @@ func TestHandleSearchAndList(t *testing.T) {
 	if err != nil || res.IsError {
 		t.Fatalf("kb_list: err=%v result=%+v", err, res)
 	}
-	lr := res.StructuredContent.(struct {
-		Entries []kb.Entry `json:"entries"`
-	})
-	if len(lr.Entries) != 2 || lr.Entries[0].Body != "" {
-		t.Errorf("kb_list entries = %+v", lr.Entries)
+	lr := res.StructuredContent.(listOutput)
+	if len(lr.Entries) != 2 || lr.Entries[0].Body != "" || lr.Total != 2 || lr.NextCursor != "" {
+		t.Errorf("kb_list result = %+v", lr)
+	}
+}
+
+func TestHandleListPagination(t *testing.T) {
+	k, _ := newTestKB(t)
+	for _, slug := range []string{"alpha", "bravo", "charlie"} {
+		if _, err := k.handleAdd(context.Background(), callReq("kb_add", map[string]any{
+			"title": slug, "body": "body", "slug": slug,
+		})); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res, err := k.handleList(context.Background(), callReq("kb_list", map[string]any{"limit": 2}))
+	if err != nil || res.IsError {
+		t.Fatalf("kb_list page 1: err=%v result=%+v", err, res)
+	}
+	page1 := res.StructuredContent.(listOutput)
+	if len(page1.Entries) != 2 || page1.Total != 3 || page1.NextCursor != "bravo" {
+		t.Fatalf("page 1 = %+v", page1)
+	}
+
+	res, err = k.handleList(context.Background(), callReq("kb_list", map[string]any{
+		"limit": 2, "cursor": page1.NextCursor,
+	}))
+	if err != nil || res.IsError {
+		t.Fatalf("kb_list page 2: err=%v result=%+v", err, res)
+	}
+	page2 := res.StructuredContent.(listOutput)
+	if len(page2.Entries) != 1 || page2.Entries[0].Slug != "charlie" || page2.NextCursor != "" {
+		t.Errorf("page 2 = %+v", page2)
 	}
 }
 

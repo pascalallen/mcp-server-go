@@ -20,6 +20,23 @@ import (
 
 const kbURIPrefix = "kb://"
 
+// Structured result types for the kb tools. Each doubles as the declared
+// output schema for its tool, so the two can never drift apart.
+type searchOutput struct {
+	Results []kb.SearchResult `json:"results"`
+}
+
+type listOutput struct {
+	Entries    []kb.Entry `json:"entries"`
+	Total      int        `json:"total"`
+	NextCursor string     `json:"next_cursor,omitempty"`
+}
+
+type deleteOutput struct {
+	Slug    string `json:"slug"`
+	Deleted bool   `json:"deleted"`
+}
+
 // kbAPI holds what the knowledge base handlers need: the store itself, and
 // the MCP server so entries can be registered and removed as resources.
 type kbAPI struct {
@@ -45,6 +62,9 @@ func registerKB(s *server.MCPServer, store *kb.Store) {
 		mcpgo.WithString("body", mcpgo.Required(), mcpgo.Description("Entry body in Markdown")),
 		mcpgo.WithArray("tags", mcpgo.WithStringItems(), mcpgo.Description("Tags for categorization and search")),
 		mcpgo.WithString("slug", mcpgo.Description("Optional slug override (lowercase words separated by hyphens)")),
+		mcpgo.WithDestructiveHintAnnotation(false),
+		mcpgo.WithIdempotentHintAnnotation(false),
+		mcpgo.WithOutputSchema[kb.Entry](),
 	), k.handleAdd)
 
 	s.AddTool(mcpgo.NewTool(
@@ -52,6 +72,7 @@ func registerKB(s *server.MCPServer, store *kb.Store) {
 		mcpgo.WithDescription("Returns a knowledge base entry, including its full body."),
 		mcpgo.WithString("slug", mcpgo.Required(), mcpgo.Description("Slug of the entry to fetch")),
 		mcpgo.WithReadOnlyHintAnnotation(true),
+		mcpgo.WithOutputSchema[kb.Entry](),
 	), k.handleGet)
 
 	s.AddTool(mcpgo.NewTool(
@@ -62,6 +83,7 @@ func registerKB(s *server.MCPServer, store *kb.Store) {
 		mcpgo.WithString("body", mcpgo.Description("New body in Markdown")),
 		mcpgo.WithArray("tags", mcpgo.WithStringItems(), mcpgo.Description("New tags")),
 		mcpgo.WithIdempotentHintAnnotation(true),
+		mcpgo.WithOutputSchema[kb.Entry](),
 	), k.handleUpdate)
 
 	s.AddTool(mcpgo.NewTool(
@@ -70,20 +92,25 @@ func registerKB(s *server.MCPServer, store *kb.Store) {
 		mcpgo.WithString("slug", mcpgo.Required(), mcpgo.Description("Slug of the entry to delete")),
 		mcpgo.WithDestructiveHintAnnotation(true),
 		mcpgo.WithIdempotentHintAnnotation(true),
+		mcpgo.WithOutputSchema[deleteOutput](),
 	), k.handleDelete)
 
 	s.AddTool(mcpgo.NewTool(
 		"kb_search",
 		mcpgo.WithDescription("Searches knowledge base entries by keyword over titles, tags, and bodies. Returns scored results with snippets."),
 		mcpgo.WithString("query", mcpgo.Required(), mcpgo.Description("Keywords to search for")),
-		mcpgo.WithNumber("limit", mcpgo.Description("Maximum number of results (default 5)")),
+		mcpgo.WithNumber("limit", mcpgo.Description(fmt.Sprintf("Maximum number of results (default %d, max %d)", kb.DefaultSearchLimit, kb.MaxSearchLimit))),
 		mcpgo.WithReadOnlyHintAnnotation(true),
+		mcpgo.WithOutputSchema[searchOutput](),
 	), k.handleSearch)
 
 	s.AddTool(mcpgo.NewTool(
 		"kb_list",
-		mcpgo.WithDescription("Lists all knowledge base entries (metadata only, no bodies)."),
+		mcpgo.WithDescription("Lists knowledge base entries (metadata only, no bodies), paginated by slug."),
+		mcpgo.WithString("cursor", mcpgo.Description("Opaque pagination cursor from a previous kb_list result; omit for the first page")),
+		mcpgo.WithNumber("limit", mcpgo.Description(fmt.Sprintf("Maximum entries per page (default %d, max %d)", kb.DefaultListLimit, kb.MaxListLimit))),
 		mcpgo.WithReadOnlyHintAnnotation(true),
+		mcpgo.WithOutputSchema[listOutput](),
 	), k.handleList)
 
 	for _, e := range store.List() {
@@ -132,7 +159,7 @@ func (k *kbAPI) handleAdd(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.
 	}
 	e, err := k.store.Add(req.GetString("slug", ""), title, body, req.GetStringSlice("tags", nil))
 	if err != nil {
-		if errors.Is(err, kb.ErrExists) || strings.Contains(err.Error(), "invalid slug") {
+		if errors.Is(err, kb.ErrExists) || errors.Is(err, kb.ErrInvalidSlug) {
 			return mcpgo.NewToolResultError(err.Error()), nil
 		}
 		return nil, err
@@ -200,7 +227,7 @@ func (k *kbAPI) handleDelete(_ context.Context, req mcpgo.CallToolRequest) (*mcp
 		return nil, err
 	}
 	k.srv.RemoveResource(kbURIPrefix + slug)
-	return mcpgo.NewToolResultText("Deleted " + kbURIPrefix + slug), nil
+	return mcpgo.NewToolResultStructured(deleteOutput{Slug: slug, Deleted: true}, "Deleted "+kbURIPrefix+slug), nil
 }
 
 func (k *kbAPI) handleSearch(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -208,26 +235,25 @@ func (k *kbAPI) handleSearch(_ context.Context, req mcpgo.CallToolRequest) (*mcp
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
 	}
-	results := k.store.Search(query, req.GetInt("limit", 5))
+	results := k.store.Search(query, req.GetInt("limit", kb.DefaultSearchLimit))
 	fallback := fmt.Sprintf("%d result(s) for %q", len(results), query)
 	for _, r := range results {
 		fallback += fmt.Sprintf("\n- %s%s (%s, score %d): %s", kbURIPrefix, r.Entry.Slug, r.Entry.Title, r.Score, r.Snippet)
 	}
-	return mcpgo.NewToolResultStructured(struct {
-		Results []kb.SearchResult `json:"results"`
-	}{Results: results}, fallback), nil
+	return mcpgo.NewToolResultStructured(searchOutput{Results: results}, fallback), nil
 }
 
-func (k *kbAPI) handleList(_ context.Context, _ mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-	entries := k.store.List()
+func (k *kbAPI) handleList(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	entries, total, nextCursor := k.store.ListPage(req.GetString("cursor", ""), req.GetInt("limit", 0))
 	for i := range entries {
 		entries[i].Body = ""
 	}
-	fallback := fmt.Sprintf("%d entrie(s)", len(entries))
+	fallback := fmt.Sprintf("%d of %d entrie(s)", len(entries), total)
 	for _, e := range entries {
 		fallback += fmt.Sprintf("\n- %s%s: %s", kbURIPrefix, e.Slug, e.Title)
 	}
-	return mcpgo.NewToolResultStructured(struct {
-		Entries []kb.Entry `json:"entries"`
-	}{Entries: entries}, fallback), nil
+	if nextCursor != "" {
+		fallback += fmt.Sprintf("\nmore available: pass cursor %q", nextCursor)
+	}
+	return mcpgo.NewToolResultStructured(listOutput{Entries: entries, Total: total, NextCursor: nextCursor}, fallback), nil
 }
